@@ -25,14 +25,15 @@ test_count: 81
 test_result: PASS
 genvm_version: vstudio-dev
 source_sha256: e85bcf9a58a7ed1e149127a1e67a7bcba7f1bc66b1bdc89386cc6937b63c8818
-deployed: PENDING
-deployment_tx:
-contract_address:
+deployed: YES
+deployment_tx: 0xde45b566a396c513f245f0361d048b083bd355d6e261f1842c7f5405822dc598
+contract_address: 0x1252E139623024A1c0e69ee8cFc1035E86810763
 github: https://github.com/Iniwura/CollisionLock
 commit:
-pushed: PENDING
-secret_scan: PENDING
-ready_for_submission: PENDING
+pushed: YES
+secret_scan: PASS
+live_smoke: PASS
+ready_for_submission: YES
 ```
 
 The contract does not create a frontend. It only protects downstream systems
