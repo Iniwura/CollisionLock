@@ -27,12 +27,13 @@ record in it is an invariant failure rather than a silently ignored stale ID.
 
 ## Consensus boundaries
 
-Each write has at most one route consensus call and one comparison consensus
-call. The route call returns exact enums for retrieval ordering. The comparison
-call returns a list aligned to the exact candidate IDs supplied by the
-contract. Neither call returns a final lock decision. Contract code validates
-shape, enum membership, booleans, status, count, and ordering before deriving
-the final relation.
+Each acquisition has one consensus assessment. Inside that single
+`run_nondet` boundary, the leader and validators independently derive the
+route, rank the complete active set, and return a comparison list aligned to
+the exact candidate IDs. Neither model call returns a final lock decision.
+Contract code validates shape, enum membership, booleans, status, count, and
+ordering before deriving the final relation. Keeping both steps inside one
+boundary is required by the Studio Dev runtime.
 
 All operation text is delimited as untrusted data in prompts. Prompt
 injection, fake role messages, requested answers, and model-provided final

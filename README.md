@@ -57,6 +57,10 @@ schema/profile labels. An `ACTIVE` exact duplicate is rejected; a historical
   system, resource relation, state relation, dependency interference, effect
   compatibility, ordering required, and semantic status. Model prose and a
   model-supplied final conflict boolean are not accepted or stored.
+- Routing and comparison are evaluated inside one consensus assessment per
+  acquisition because Studio Dev permits only one nondeterministic consensus
+  boundary in a public write. The route still ranks the complete bounded set
+  before the comparison projection is requested.
 - `close_lock` is owner-only and removes the ID from the authoritative active
   index. There is no expiry, clock check, force flag, admin bypass, or sponsor
   bypass.

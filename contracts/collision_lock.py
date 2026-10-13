@@ -283,27 +283,6 @@ def _normalize_route(value: Any) -> dict[str, str]:
     }
 
 
-def _consensus_route(packet: dict[str, Any]) -> dict[str, str]:
-    prompt = _route_prompt(packet)
-
-    def leader() -> dict[str, Any]:
-        raw = gl.nondet.exec_prompt(prompt, response_format="json")
-        return _normalize_route(raw)
-
-    def validator(leader_result: gl.vm.Result) -> bool:
-        if not isinstance(leader_result, gl.vm.Return):
-            return False
-        try:
-            leader_route = _normalize_route(leader_result.calldata)
-            observed = gl.nondet.exec_prompt(prompt, response_format="json")
-            return leader_route == _normalize_route(observed)
-        except Exception:
-            return False
-
-    result = gl.vm.run_nondet(leader, validator)
-    return _normalize_route(result)
-
-
 def _comparison_prompt(packet: dict[str, Any], prior: list[dict[str, Any]]) -> str:
     return (
         "You are a structural interference analyst for CollisionLock.\n"
@@ -366,29 +345,6 @@ def _normalize_projection(value: Any, expected_ids: list[str]) -> list[dict[str,
         )
         normalized.append(item)
     return normalized
-
-
-def _consensus_compare(packet: dict[str, Any], prior: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    expected_ids = [item["lock_id"] for item in prior]
-    prompt = _comparison_prompt(packet, prior)
-
-    def leader() -> dict[str, Any]:
-        raw = gl.nondet.exec_prompt(prompt, response_format="json")
-        return {"comparisons": _normalize_projection(raw, expected_ids)}
-
-    def validator(leader_result: gl.vm.Result) -> bool:
-        if not isinstance(leader_result, gl.vm.Return):
-            return False
-        try:
-            leader_data = _normalize_projection(leader_result.calldata, expected_ids)
-            observed = gl.nondet.exec_prompt(prompt, response_format="json")
-            observed_data = _normalize_projection(observed, expected_ids)
-            return leader_data == observed_data
-        except Exception:
-            return False
-
-    result = gl.vm.run_nondet(leader, validator)
-    return _normalize_projection(result, expected_ids)
 
 
 def _derive_relation(item: dict[str, Any]) -> str:
@@ -478,6 +434,95 @@ def _route_overlap(record: LockRecord, route: dict[str, str]) -> int:
     )
 
 
+def _rank_candidate_records(
+    route: dict[str, str],
+    records: list[LockRecord],
+) -> list[LockRecord]:
+    ranked: list[tuple[int, str, str, LockRecord]] = []
+    for record in records:
+        overlap = _route_overlap(record, route)
+        stable_rank = _digest(
+            "COLLISIONLOCK-RETRIEVAL-RANK-V1",
+            [route, record.lock_id],
+        )
+        ranked.append((-overlap, stable_rank, record.lock_id, record))
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [item[3] for item in ranked[:MAX_COMPARISON_CANDIDATES]]
+
+
+def _consensus_assess(
+    packet: dict[str, Any],
+    active_records: list[LockRecord],
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    route_prompt = _route_prompt(packet)
+
+    def candidates_and_prior(
+        route: dict[str, str],
+    ) -> tuple[list[LockRecord], list[dict[str, Any]], list[str]]:
+        candidates = _rank_candidate_records(route, active_records)
+        prior = [_packet_from_record(record) for record in candidates]
+        expected_ids = [item["lock_id"] for item in prior]
+        return candidates, prior, expected_ids
+
+    def leader() -> dict[str, Any]:
+        raw_route = gl.nondet.exec_prompt(route_prompt, response_format="json")
+        route = _normalize_route(raw_route)
+        _candidates, prior, expected_ids = candidates_and_prior(route)
+        if expected_ids:
+            raw_comparison = gl.nondet.exec_prompt(
+                _comparison_prompt(packet, prior),
+                response_format="json",
+            )
+            comparisons = _normalize_projection(raw_comparison, expected_ids)
+        else:
+            comparisons = []
+        return {"route": route, "comparisons": comparisons}
+
+    def validator(leader_result: gl.vm.Result) -> bool:
+        if not isinstance(leader_result, gl.vm.Return):
+            return False
+        try:
+            leader_value = leader_result.calldata
+            if type(leader_value) is not dict or set(leader_value.keys()) != {"route", "comparisons"}:
+                return False
+            leader_route = _normalize_route(leader_value["route"])
+            leader_candidates = _rank_candidate_records(leader_route, active_records)
+            leader_ids = [record.lock_id for record in leader_candidates]
+            leader_comparisons = _normalize_projection(
+                {"comparisons": leader_value["comparisons"]},
+                leader_ids,
+            )
+            observed_route = _normalize_route(
+                gl.nondet.exec_prompt(route_prompt, response_format="json")
+            )
+            observed_candidates, observed_prior, observed_ids = candidates_and_prior(observed_route)
+            if observed_ids:
+                observed_raw = gl.nondet.exec_prompt(
+                    _comparison_prompt(packet, observed_prior),
+                    response_format="json",
+                )
+                observed_comparisons = _normalize_projection(observed_raw, observed_ids)
+            else:
+                observed_comparisons = []
+            if observed_route != leader_route or observed_ids != leader_ids:
+                return False
+            return leader_comparisons == observed_comparisons
+        except Exception:
+            return False
+
+    result = gl.vm.run_nondet(leader, validator)
+    if type(result) is not dict or set(result.keys()) != {"route", "comparisons"}:
+        raise gl.vm.UserError("consensus assessment shape is invalid.")
+    route = _normalize_route(result["route"])
+    active_candidates = _rank_candidate_records(route, active_records)
+    expected_ids = [record.lock_id for record in active_candidates]
+    comparisons = _normalize_projection(
+        {"comparisons": result["comparisons"]},
+        expected_ids,
+    )
+    return route, comparisons
+
+
 class CollisionLock(gl.contract.Contract):
     """A bounded, fail-closed semantic mutex for autonomous operations."""
 
@@ -504,16 +549,13 @@ class CollisionLock(gl.contract.Contract):
 
     def _candidate_ids(self, fingerprint: str, route: dict[str, str]) -> list[str]:
         del fingerprint
-        ranked: list[tuple[int, str, str]] = []
+        records: list[LockRecord] = []
         for lock_id in self._active_ids():
             record = self._lock(lock_id)
             if record.state != ACTIVE:
                 raise gl.vm.UserError("active index contains a non-active lock.")
-            overlap = _route_overlap(record, route)
-            stable_rank = _digest("COLLISIONLOCK-RETRIEVAL-RANK-V1", [route, lock_id])
-            ranked.append((-overlap, stable_rank, lock_id))
-        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-        return [item[2] for item in ranked[:MAX_COMPARISON_CANDIDATES]]
+            records.append(record)
+        return [record.lock_id for record in _rank_candidate_records(route, records)]
 
     def _remove_active(self, lock_id: str) -> None:
         active_ids = self._active_ids()
@@ -542,13 +584,9 @@ class CollisionLock(gl.contract.Contract):
             if previous.state == ACTIVE:
                 raise gl.vm.UserError("identical operation is already ACTIVE.")
 
-        route = _consensus_route(packet)
-        candidate_ids = self._candidate_ids(fingerprint, route)
-        prior: list[dict[str, Any]] = []
-        for candidate_id in candidate_ids:
-            prior.append(_packet_from_record(self._lock(candidate_id)))
-
-        projections = _consensus_compare(packet, prior) if prior else []
+        active_records = [self._lock(active_id) for active_id in active_ids]
+        route, projections = _consensus_assess(packet, active_records)
+        candidate_ids = [item.lock_id for item in _rank_candidate_records(route, active_records)]
         comparisons: list[dict[str, Any]] = []
         for projection in projections:
             comparison = dict(projection)

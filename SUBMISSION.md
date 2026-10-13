@@ -24,7 +24,7 @@ chain_id: 61997
 test_count: 81
 test_result: PASS
 genvm_version: vstudio-dev
-source_sha256:
+source_sha256: e85bcf9a58a7ed1e149127a1e67a7bcba7f1bc66b1bdc89386cc6937b63c8818
 deployed: PENDING
 deployment_tx:
 contract_address:
