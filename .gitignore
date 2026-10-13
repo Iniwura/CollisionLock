@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.pyright/
+.mypy_cache/
+.coverage
+coverage.xml
+artifacts/
+.env
+*.key
+*.pem
+*.keystore
+*.secret
+fee-profile*.json

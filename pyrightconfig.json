@@ -1,0 +1,10 @@
+{
+  "include": ["contracts", "tests"],
+  "exclude": [".venv"],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportFunctionMemberAccess": false
+}
