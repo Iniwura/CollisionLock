@@ -3,8 +3,8 @@
 ## Scope
 
 This audit covers packet validation, exact identity, consensus handling,
-active-index maintenance, ownership, and semantic conflict derivation in the
-v1 contract.
+active-index maintenance, ownership, admission controls, lifecycle enforcement,
+and semantic conflict derivation in the v1 contract.
 
 ## Findings and controls
 
@@ -23,6 +23,9 @@ v1 contract.
 | Another wallet closes a lock | Owner is stored from `gl.message.sender_address` and checked on close | Mitigated |
 | Exact fingerprints block history forever | Only an ACTIVE matching fingerprint is rejected; CLOSED history can be reacquired | Mitigated |
 | Model directly decides final state | Model cannot return `relation` or `conflict`; contract derives it | Mitigated |
+| Single address exhausts 32 active slots | Per-owner active lock limit (`MAX_ACTIVE_PER_OWNER = 8`) enforces multi-tenant admission | Mitigated |
+| Abandoned or hostile locks permanently block slots | Monotonic epoch TTL (`LOCK_MAX_EPOCH_AGE = 64`) with permissionless `reap_expired_lock` and `touch` recovery | Mitigated |
+| Legitimate lock holder evicted prematurely | Owner can call `extend_lock` to reset epoch TTL before expiry | Mitigated |
 
 ## Residual risks
 

@@ -16,6 +16,7 @@ PACKET_PROFILE = "OPERATION_PACKET_V1"
 
 ACTIVE = "ACTIVE"
 CLOSED = "CLOSED"
+EXPIRED = "EXPIRED"
 
 COMPLETE = "COMPLETE"
 UNRESOLVED = "UNRESOLVED"
@@ -122,6 +123,8 @@ MAX_PACKET_BYTES = 6500
 MAX_LOCKS = 1024
 MAX_ACTIVE_LOCKS = 32
 MAX_COMPARISON_CANDIDATES = MAX_ACTIVE_LOCKS
+MAX_ACTIVE_PER_OWNER = 8
+LOCK_MAX_EPOCH_AGE = 64
 HEX = "0123456789abcdef"
 
 
@@ -146,6 +149,7 @@ class LockRecord:
     compared_lock_ids_json: str
     comparisons_json: str
     registration_fingerprint: str
+    acquired_at_epoch: str
 
 
 def _canonical(value: Any) -> str:
@@ -406,6 +410,7 @@ def _view(record: LockRecord) -> dict[str, Any]:
         "compared_lock_ids": json.loads(record.compared_lock_ids_json),
         "comparisons": json.loads(record.comparisons_json),
         "registration_fingerprint": record.registration_fingerprint,
+        "acquired_at_epoch": int(record.acquired_at_epoch),
     }
 
 
@@ -530,10 +535,16 @@ class CollisionLock(gl.contract.Contract):
     fingerprint_index: gl.storage.TreeMap[str, str]
     lock_count: u256
     active_ids_json: str
+    epoch: u256
 
     def __init__(self):
         self.lock_count = 0
         self.active_ids_json = "[]"
+        self.epoch = 0
+
+    def _advance_epoch(self) -> int:
+        self.epoch = self.epoch + 1
+        return int(self.epoch)
 
     def _lock(self, lock_id: str) -> LockRecord:
         record = self.locks.get(lock_id, None)
@@ -566,6 +577,7 @@ class CollisionLock(gl.contract.Contract):
 
     @gl.public.write
     def acquire_lock(self, lock_id: str, packet: dict[str, Any]) -> str:
+        current_epoch = self._advance_epoch()
         lock_id = _identifier(lock_id, "lock_id")
         packet = _validate_packet(packet)
         if int(self.lock_count) >= MAX_LOCKS:
@@ -576,6 +588,13 @@ class CollisionLock(gl.contract.Contract):
         active_ids = self._active_ids()
         if len(active_ids) >= MAX_ACTIVE_LOCKS:
             raise gl.vm.UserError("active lock capacity exceeded.")
+
+        owner = _address_key(gl.message.sender_address)
+        owner_count = sum(
+            1 for aid in active_ids if self._lock(aid).owner == owner
+        )
+        if owner_count >= MAX_ACTIVE_PER_OWNER:
+            raise gl.vm.UserError("per-owner active lock limit exceeded.")
 
         fingerprint = _operation_fingerprint(packet)
         previous_id = self.fingerprint_index.get(fingerprint, "")
@@ -597,7 +616,6 @@ class CollisionLock(gl.contract.Contract):
         if any(item["relation"] == UNRESOLVED for item in comparisons):
             raise gl.vm.UserError("operation interference is unresolved.")
 
-        owner = _address_key(gl.message.sender_address)
         registration_fingerprint = _digest(
             "COLLISIONLOCK-REGISTRATION-FINGERPRINT-V1",
             {
@@ -626,6 +644,7 @@ class CollisionLock(gl.contract.Contract):
             compared_lock_ids_json=_canonical(candidate_ids),
             comparisons_json=_canonical(comparisons),
             registration_fingerprint=registration_fingerprint,
+            acquired_at_epoch=str(current_epoch),
         )
         self.locks[lock_id] = record
         self.fingerprint_index[fingerprint] = lock_id
@@ -636,10 +655,11 @@ class CollisionLock(gl.contract.Contract):
 
     @gl.public.write
     def close_lock(self, lock_id: str) -> str:
+        self._advance_epoch()
         lock_id = _identifier(lock_id, "lock_id")
         record = self._lock(lock_id)
         if record.state != ACTIVE:
-            raise gl.vm.UserError("lock is already CLOSED.")
+            raise gl.vm.UserError("lock is not ACTIVE.")
         caller = _address_key(gl.message.sender_address)
         if caller != record.owner:
             raise gl.vm.UserError("only the lock owner may close it.")
@@ -647,6 +667,43 @@ class CollisionLock(gl.contract.Contract):
         record.state = CLOSED
         self.locks[lock_id] = record
         return record.fingerprint
+
+    @gl.public.write
+    def extend_lock(self, lock_id: str) -> str:
+        """Owner refreshes the lock's TTL epoch, proving continued need."""
+        current_epoch = self._advance_epoch()
+        lock_id = _identifier(lock_id, "lock_id")
+        record = self._lock(lock_id)
+        if record.state != ACTIVE:
+            raise gl.vm.UserError("lock is not ACTIVE.")
+        caller = _address_key(gl.message.sender_address)
+        if caller != record.owner:
+            raise gl.vm.UserError("only the lock owner may extend it.")
+        record.acquired_at_epoch = str(current_epoch)
+        self.locks[lock_id] = record
+        return record.fingerprint
+
+    @gl.public.write
+    def reap_expired_lock(self, lock_id: str) -> str:
+        """Anyone may close a lock that has exceeded its epoch-based TTL."""
+        current_epoch = self._advance_epoch()
+        lock_id = _identifier(lock_id, "lock_id")
+        record = self._lock(lock_id)
+        if record.state != ACTIVE:
+            raise gl.vm.UserError("lock is not ACTIVE.")
+        age = current_epoch - int(record.acquired_at_epoch)
+        if age < LOCK_MAX_EPOCH_AGE:
+            raise gl.vm.UserError("lock has not expired.")
+        self._remove_active(lock_id)
+        record.state = EXPIRED
+        self.locks[lock_id] = record
+        return record.fingerprint
+
+    @gl.public.write
+    def touch(self) -> u256:
+        """Advance the epoch counter. Used to age locks toward expiry."""
+        self._advance_epoch()
+        return self.epoch
 
     @gl.public.view
     def get_lock(self, lock_id: str) -> dict[str, Any]:
@@ -685,3 +742,7 @@ class CollisionLock(gl.contract.Contract):
     @gl.public.view
     def is_active(self, lock_id: str) -> bool:
         return self._lock(_identifier(lock_id, "lock_id")).state == ACTIVE
+
+    @gl.public.view
+    def get_epoch(self) -> u256:
+        return self.epoch

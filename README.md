@@ -39,13 +39,25 @@ acquire_lock(lock_id, packet) -> operation fingerprint
 and lists are bounded, duplicate-free, and sorted before hashing. The
 fingerprint is SHA-256 over every meaningful canonical packet field plus the
 schema/profile labels. An `ACTIVE` exact duplicate is rejected; a historical
-`CLOSED` packet may be acquired again under a fresh lock ID.
+`CLOSED` or `EXPIRED` packet may be acquired again under a fresh lock ID.
 
-## Architecture
+## Architecture & Lifecycle
 
 - `LockRecord` freezes owner, packet, fingerprint, consensus route, state,
-  compared lock IDs, and canonical structural projections.
+  compared lock IDs, canonical structural projections, and `acquired_at_epoch`.
 - The owner is always `gl.message.sender_address`; callers cannot choose it.
+- **Admission control**: Each owner can hold at most `MAX_ACTIVE_PER_OWNER = 8`
+  concurrent active locks. This prevents a single untrusted caller from
+  monopolizing the 32 slots.
+- **Epoch-based TTL**: A monotonic interaction epoch advances on every write.
+  Locks older than `LOCK_MAX_EPOCH_AGE = 64` epochs can be permissionlessly
+  evicted via `reap_expired_lock(lock_id)`.
+- **Heartbeat renewal**: Legitimate lock holders can extend their lease via
+  `extend_lock(lock_id)` to refresh their epoch timestamp without releasing the
+  lock.
+- **Recovery via `touch()`**: Any caller can invoke `touch()` to advance the
+  epoch and age inactive or abandoned locks toward expiry even during periods of
+  inactivity.
 - Routing consensus independently derives four exact enums:
   `system_domain`, `resource_family`, `effect_family`, and `dependency_family`.
   Routing only ranks retrieval candidates and never decides compatibility.
@@ -62,8 +74,7 @@ schema/profile labels. An `ACTIVE` exact duplicate is rejected; a historical
   boundary in a public write. The route still ranks the complete bounded set
   before the comparison projection is requested.
 - `close_lock` is owner-only and removes the ID from the authoritative active
-  index. There is no expiry, clock check, force flag, admin bypass, or sponsor
-  bypass.
+  index.
 
 ## Deterministic conflict rule
 
@@ -83,12 +94,15 @@ before persistent state is changed.
 
 ## Public schema
 
-There are 2 writes and 8 views. The exact extracted schema is checked in at
+There are 5 writes and 9 views. The exact extracted schema is checked in at
 [schema/collision_lock.schema.json](schema/collision_lock.schema.json).
 
 ```text
 acquire_lock(lock_id, packet)
 close_lock(lock_id)
+extend_lock(lock_id)
+reap_expired_lock(lock_id)
+touch()
 get_lock(lock_id)
 get_lock_count()
 get_active_lock_count()
@@ -97,6 +111,7 @@ get_compared_locks(lock_id)
 get_operation_fingerprint(lock_id)
 find_exact_fingerprint(fingerprint)
 is_active(lock_id)
+get_epoch()
 ```
 
 ## Local verification
@@ -118,7 +133,8 @@ git diff --check
 The direct suite includes packet, fingerprint, ownership, closure, exact
 duplicate, route integrity, prompt injection, malformed consensus, validator
 disagreement, structural conflict, compatible coexistence, multi-candidate,
-capacity, active-index compaction, and rollback-isolation tests.
+capacity, active-index compaction, rollback-isolation, per-owner admission,
+epoch TTL expiry, lease extension, and permissionless reap recovery tests.
 
 ## Deployment
 

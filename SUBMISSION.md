@@ -7,12 +7,28 @@ interference facts, and derives mutual exclusion deterministically. It is
 distinct from duplicate detection because different operations may conflict
 through shared state or dependencies.
 
+## Lifecycle & Admission Controls
+
+To prevent arbitrary callers from permanently exhausting the 32 shared
+active-lock slots, CollisionLock enforces:
+
+1. **Per-owner admission cap (`MAX_ACTIVE_PER_OWNER = 8`)**: A single caller
+   address cannot consume more than 8 concurrent active slots.
+2. **Epoch-based TTL (`LOCK_MAX_EPOCH_AGE = 64`)**: Active locks expire after
+   64 state-changing epochs. Legitimate owners can refresh their lease via
+   `extend_lock`.
+3. **Permissionless eviction (`reap_expired_lock`)**: Anyone can reap an
+   expired lock, ensuring abandoned or malicious locks cannot indefinitely block
+   future acquisitions.
+4. **Epoch advancement (`touch`)**: Callers can advance the epoch counter to age
+   stale locks during idle periods.
+
 ## Release gates
 
 The release requires the direct adversarial suite, `genvm-lint check`, schema
 extraction, packaged typecheck, Pyright, `git diff --check`, hostile audit,
 source SHA-256 freeze, finalized Studio Dev deployment, deployed-source
-readback, and a real three-lock smoke test. The final evidence is kept in
+readback, and a real smoke test. The final evidence is kept in
 [PORTAL.md](PORTAL.md).
 
 ## Release facts
@@ -21,15 +37,15 @@ readback, and a real three-lock smoke test. The final evidence is kept in
 project_path: /home/ini/collisionlock
 network: Studio Dev
 chain_id: 61997
-test_count: 81
+test_count: 96
 test_result: PASS
 genvm_version: vstudio-dev
-source_sha256: e85bcf9a58a7ed1e149127a1e67a7bcba7f1bc66b1bdc89386cc6937b63c8818
+source_sha256: d17fa0cbc08ce1550cdb1ae2348ce8fdb576fd1141c43b7cd88b4b6a6da167e8
 deployed: YES
-deployment_tx: 0xde45b566a396c513f245f0361d048b083bd355d6e261f1842c7f5405822dc598
-contract_address: 0x1252E139623024A1c0e69ee8cFc1035E86810763
+deployment_tx: 0x7c49b08f421e938ba51664db2a2d4b8e9076f821ccf8734279b3da4691e847c2
+contract_address: 0x41a87e07664B34C085f178496464522De5C5D8B6
 github: https://github.com/Iniwura/CollisionLock
-commit: ba6fe97
+commit: f46c117
 pushed: YES
 secret_scan: PASS
 live_smoke: PASS

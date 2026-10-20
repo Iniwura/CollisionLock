@@ -22,6 +22,9 @@ PACKET = {
     "constraints": "must not overlap a deployment using the old credential",
 }
 
+MAX_ACTIVE_PER_OWNER = 8
+LOCK_MAX_EPOCH_AGE = 64
+
 
 def deploy(direct_deploy):
     return direct_deploy(CONTRACT)
@@ -105,6 +108,16 @@ def fingerprint(value):
     ).hexdigest()
 
 
+def make_sender(n):
+    """Create a unique non-zero 20-byte test address for multi-owner tests."""
+    return b'\x00' * 19 + bytes([n + 10])
+
+
+# ---------------------------------------------------------------------------
+# Original tests (preserved, updated where necessary)
+# ---------------------------------------------------------------------------
+
+
 def test_first_lock_is_active_and_binds_owner_packet_route_and_fingerprint(direct_deploy, direct_vm, direct_alice):
     contract = deploy(direct_deploy)
     result = acquire(contract, direct_vm, direct_alice)
@@ -116,8 +129,10 @@ def test_first_lock_is_active_and_binds_owner_packet_route_and_fingerprint(direc
     assert view["state"] == "ACTIVE"
     assert view["compared_lock_ids"] == []
     assert view["comparisons"] == []
+    assert view["acquired_at_epoch"] == 1
     assert contract.get_lock_count() == 1
     assert contract.get_active_lock_count() == 1
+    assert contract.get_epoch() == 1
 
 
 def test_packet_list_order_is_canonicalized_for_fingerprint(direct_deploy, direct_vm, direct_alice):
@@ -461,7 +476,7 @@ def test_owner_can_close_but_cannot_close_twice(direct_deploy, direct_vm, direct
     direct_vm.sender = direct_alice
     returned = contract.close_lock("lock-a")
     assert returned == fingerprint(PACKET)
-    with direct_vm.expect_revert("already CLOSED"):
+    with direct_vm.expect_revert("not ACTIVE"):
         contract.close_lock("lock-a")
     assert contract.get_lock("lock-a")["state"] == "CLOSED"
 
@@ -555,6 +570,9 @@ def test_public_schema_surface_is_compact(direct_deploy, direct_vm, direct_alice
     for name in [
         "acquire_lock",
         "close_lock",
+        "extend_lock",
+        "reap_expired_lock",
+        "touch",
         "get_lock",
         "get_lock_count",
         "get_active_lock_count",
@@ -563,6 +581,7 @@ def test_public_schema_surface_is_compact(direct_deploy, direct_vm, direct_alice
         "get_operation_fingerprint",
         "find_exact_fingerprint",
         "is_active",
+        "get_epoch",
     ]:
         assert callable(getattr(contract, name))
 
@@ -588,17 +607,21 @@ def test_unresolved_enum_in_any_projection_fails_closed(direct_deploy, direct_vm
 
 def test_active_capacity_rejects_without_mutation(direct_deploy, direct_vm, direct_alice):
     contract = deploy(direct_deploy)
+    senders = [make_sender(i) for i in range(4)]
     for index in range(32):
+        sender = senders[index // MAX_ACTIVE_PER_OWNER]
         lock_id = "l" + str(index)
         value = packet(operation="operation-" + str(index))
         if index == 0:
-            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value)
+            acquire(contract, direct_vm, sender, lock_id=lock_id, value=value)
         else:
             ids = ["l" + str(previous) for previous in range(index)]
             values = [projection(item) for item in ids]
             install_comparison(direct_vm, ids, values)
-            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value, comparisons=values)
+            acquire(contract, direct_vm, sender, lock_id=lock_id, value=value, comparisons=values)
     assert contract.get_active_lock_count() == 32
+    assert contract.get_epoch() == 32
+    direct_vm.sender = direct_alice
     install_route(direct_vm)
     with direct_vm.expect_revert("capacity"):
         contract.acquire_lock("overflow", packet(operation="overflow"))
@@ -607,19 +630,293 @@ def test_active_capacity_rejects_without_mutation(direct_deploy, direct_vm, dire
 
 def test_close_then_reuse_active_capacity(direct_deploy, direct_vm, direct_alice):
     contract = deploy(direct_deploy)
+    senders = [make_sender(i) for i in range(4)]
     for index in range(32):
+        sender = senders[index // MAX_ACTIVE_PER_OWNER]
         lock_id = "l" + str(index)
         value = packet(operation="operation-" + str(index))
         if index == 0:
-            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value)
+            acquire(contract, direct_vm, sender, lock_id=lock_id, value=value)
         else:
             ids = ["l" + str(previous) for previous in range(index)]
             values = [projection(item) for item in ids]
-            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value, comparisons=values)
-    direct_vm.sender = direct_alice
+            acquire(contract, direct_vm, sender, lock_id=lock_id, value=value, comparisons=values)
+    direct_vm.sender = senders[0]
     contract.close_lock("l0")
     ids = contract._candidate_ids("0" * 64, ROUTE)
     values = [projection(item) for item in ids]
     acquire(contract, direct_vm, direct_alice, lock_id="replacement", value=packet(operation="replacement"), comparisons=values)
     assert contract.get_active_lock_count() == 32
     assert "l0" not in contract.get_lock("replacement")["compared_lock_ids"]
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle mechanism tests: per-owner cap, epoch TTL, extend, reap, touch
+# ---------------------------------------------------------------------------
+
+
+def test_per_owner_cap_rejects_excess_locks(direct_deploy, direct_vm, direct_alice):
+    """A single address cannot hold more than MAX_ACTIVE_PER_OWNER active locks."""
+    contract = deploy(direct_deploy)
+    for index in range(MAX_ACTIVE_PER_OWNER):
+        lock_id = "cap-" + str(index)
+        value = packet(operation="capped-op-" + str(index))
+        if index == 0:
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value)
+        else:
+            ids = ["cap-" + str(p) for p in range(index)]
+            values = [projection(item) for item in ids]
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value, comparisons=values)
+    assert contract.get_active_lock_count() == MAX_ACTIVE_PER_OWNER
+    ids = ["cap-" + str(p) for p in range(MAX_ACTIVE_PER_OWNER)]
+    values = [projection(item) for item in ids]
+    install_comparison(direct_vm, ids, values)
+    with direct_vm.expect_revert("per-owner"):
+        acquire(contract, direct_vm, direct_alice, lock_id="overflow", value=packet(operation="overflow"), comparisons=values)
+    assert contract.get_lock_count() == MAX_ACTIVE_PER_OWNER
+
+
+def test_per_owner_cap_does_not_block_different_owners(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """Different owners have independent caps."""
+    contract = deploy(direct_deploy)
+    for index in range(MAX_ACTIVE_PER_OWNER):
+        lock_id = "alice-" + str(index)
+        value = packet(operation="alice-op-" + str(index))
+        if index == 0:
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value)
+        else:
+            ids = ["alice-" + str(p) for p in range(index)]
+            values = [projection(item) for item in ids]
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value, comparisons=values)
+    ids = ["alice-" + str(p) for p in range(MAX_ACTIVE_PER_OWNER)]
+    values = [projection(item) for item in ids]
+    acquire(contract, direct_vm, direct_bob, lock_id="bob-0", value=packet(operation="bob-op"), comparisons=values)
+    assert contract.is_active("bob-0") is True
+    assert contract.get_active_lock_count() == MAX_ACTIVE_PER_OWNER + 1
+
+
+def test_per_owner_cap_freed_by_close(direct_deploy, direct_vm, direct_alice):
+    """Closing a lock re-opens a per-owner slot."""
+    contract = deploy(direct_deploy)
+    for index in range(MAX_ACTIVE_PER_OWNER):
+        lock_id = "cap-" + str(index)
+        value = packet(operation="capped-op-" + str(index))
+        if index == 0:
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value)
+        else:
+            ids = ["cap-" + str(p) for p in range(index)]
+            values = [projection(item) for item in ids]
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value, comparisons=values)
+    direct_vm.sender = direct_alice
+    contract.close_lock("cap-0")
+    ids = contract._candidate_ids("0" * 64, ROUTE)
+    values = [projection(item) for item in ids]
+    acquire(contract, direct_vm, direct_alice, lock_id="after-close", value=packet(operation="after-close"), comparisons=values)
+    assert contract.is_active("after-close") is True
+
+
+def test_touch_advances_epoch(direct_deploy, direct_vm, direct_alice):
+    """touch() increments the epoch counter."""
+    contract = deploy(direct_deploy)
+    assert contract.get_epoch() == 0
+    direct_vm.sender = direct_alice
+    result = contract.touch()
+    assert result == 1
+    assert contract.get_epoch() == 1
+    result = contract.touch()
+    assert result == 2
+    assert contract.get_epoch() == 2
+
+
+def test_epoch_advances_on_acquire_and_close(direct_deploy, direct_vm, direct_alice):
+    """acquire_lock and close_lock both advance the epoch."""
+    contract = deploy(direct_deploy)
+    assert contract.get_epoch() == 0
+    acquire(contract, direct_vm, direct_alice)
+    assert contract.get_epoch() == 1
+    direct_vm.sender = direct_alice
+    contract.close_lock("lock-a")
+    assert contract.get_epoch() == 2
+
+
+def test_reap_closes_expired_lock_and_anyone_can_call(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """After LOCK_MAX_EPOCH_AGE epochs, anyone can reap an active lock."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    assert contract.get_lock("lock-a")["acquired_at_epoch"] == 1
+    for _ in range(LOCK_MAX_EPOCH_AGE - 1):
+        direct_vm.sender = direct_bob
+        contract.touch()
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE
+    direct_vm.sender = direct_bob
+    result = contract.reap_expired_lock("lock-a")
+    assert result == fingerprint(PACKET)
+    view = contract.get_lock("lock-a")
+    assert view["state"] == "EXPIRED"
+    assert contract.get_active_lock_count() == 0
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE + 1
+
+
+def test_reap_non_expired_lock_reverts_without_state_change(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """reap_expired_lock reverts if the lock has not reached its TTL."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    epoch_after_acquire = contract.get_epoch()
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("not expired"):
+        contract.reap_expired_lock("lock-a")
+    assert contract.is_active("lock-a") is True
+    assert contract.get_epoch() == epoch_after_acquire
+
+
+def test_reap_already_closed_lock_reverts(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """Cannot reap a lock that was already closed by the owner."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_alice
+    contract.close_lock("lock-a")
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("not ACTIVE"):
+        contract.reap_expired_lock("lock-a")
+
+
+def test_extend_resets_ttl_and_prevents_premature_reap(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """Owner can extend a lock's TTL, preventing reaping."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    for _ in range(LOCK_MAX_EPOCH_AGE - 5):
+        direct_vm.sender = direct_bob
+        contract.touch()
+    direct_vm.sender = direct_alice
+    contract.extend_lock("lock-a")
+    extended_epoch = contract.get_epoch()
+    assert contract.get_lock("lock-a")["acquired_at_epoch"] == extended_epoch
+    for _ in range(10):
+        direct_vm.sender = direct_bob
+        contract.touch()
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("not expired"):
+        contract.reap_expired_lock("lock-a")
+    assert contract.is_active("lock-a") is True
+
+
+def test_non_owner_cannot_extend_lock(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """Only the lock owner may extend its TTL."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_bob
+    with direct_vm.expect_revert("owner"):
+        contract.extend_lock("lock-a")
+    assert contract.is_active("lock-a") is True
+
+
+def test_extend_non_active_lock_reverts(direct_deploy, direct_vm, direct_alice):
+    """Cannot extend a lock that is already closed."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_alice
+    contract.close_lock("lock-a")
+    with direct_vm.expect_revert("not ACTIVE"):
+        contract.extend_lock("lock-a")
+
+
+def test_expired_lock_allows_fingerprint_reacquisition(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """An EXPIRED lock's fingerprint can be reacquired under a new ID."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    for _ in range(LOCK_MAX_EPOCH_AGE - 1):
+        direct_vm.sender = direct_bob
+        contract.touch()
+    direct_vm.sender = direct_bob
+    contract.reap_expired_lock("lock-a")
+    assert contract.get_lock("lock-a")["state"] == "EXPIRED"
+    acquire(contract, direct_vm, direct_alice, lock_id="lock-b")
+    assert contract.is_active("lock-b") is True
+    assert contract.find_exact_fingerprint(fingerprint(PACKET)) == "lock-b"
+
+
+def test_owner_cannot_close_expired_lock(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """close_lock on an EXPIRED lock reverts cleanly."""
+    contract = deploy(direct_deploy)
+    acquire(contract, direct_vm, direct_alice)
+    for _ in range(LOCK_MAX_EPOCH_AGE - 1):
+        direct_vm.sender = direct_bob
+        contract.touch()
+    direct_vm.sender = direct_bob
+    contract.reap_expired_lock("lock-a")
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("not ACTIVE"):
+        contract.close_lock("lock-a")
+
+
+def test_untrusted_caller_cannot_permanently_block_acquisition(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """End-to-end: attacker fills all 32 slots; legitimate user recovers."""
+    contract = deploy(direct_deploy)
+    attackers = [make_sender(i) for i in range(4)]
+    for index in range(32):
+        attacker = attackers[index // MAX_ACTIVE_PER_OWNER]
+        lock_id = "atk-" + str(index)
+        value = packet(operation="attack-" + str(index))
+        if index == 0:
+            acquire(contract, direct_vm, attacker, lock_id=lock_id, value=value)
+        else:
+            ids = ["atk-" + str(p) for p in range(index)]
+            values = [projection(item) for item in ids]
+            acquire(contract, direct_vm, attacker, lock_id=lock_id, value=value, comparisons=values)
+    assert contract.get_active_lock_count() == 32
+    assert contract.get_epoch() == 32
+
+    direct_vm.sender = direct_alice
+    install_route(direct_vm)
+    with direct_vm.expect_revert("capacity"):
+        contract.acquire_lock("legit", packet(operation="legitimate operation"))
+
+    for _ in range(LOCK_MAX_EPOCH_AGE - 32):
+        direct_vm.sender = direct_alice
+        contract.touch()
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE
+
+    direct_vm.sender = direct_alice
+    contract.reap_expired_lock("atk-0")
+    assert contract.get_lock("atk-0")["state"] == "EXPIRED"
+    assert contract.get_active_lock_count() == 31
+
+    ids = contract._candidate_ids("0" * 64, ROUTE)
+    values = [projection(item) for item in ids]
+    acquire(contract, direct_vm, direct_alice, lock_id="legit", value=packet(operation="legitimate operation"), comparisons=values)
+    assert contract.is_active("legit") is True
+    assert contract.get_active_lock_count() == 32
+
+
+def test_reap_cascade_after_epoch_advancement(direct_deploy, direct_vm, direct_alice, direct_bob):
+    """After enough touches, expired locks can be reaped in sequence."""
+    contract = deploy(direct_deploy)
+    for index in range(3):
+        lock_id = "seq-" + str(index)
+        value = packet(operation="seq-op-" + str(index))
+        if index == 0:
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value)
+        else:
+            ids = ["seq-" + str(p) for p in range(index)]
+            values = [projection(item) for item in ids]
+            acquire(contract, direct_vm, direct_alice, lock_id=lock_id, value=value, comparisons=values)
+    assert contract.get_epoch() == 3
+
+    for _ in range(LOCK_MAX_EPOCH_AGE - 3):
+        direct_vm.sender = direct_bob
+        contract.touch()
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE
+
+    direct_vm.sender = direct_bob
+    contract.reap_expired_lock("seq-0")
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE + 1
+
+    direct_vm.sender = direct_bob
+    contract.reap_expired_lock("seq-1")
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE + 2
+
+    direct_vm.sender = direct_bob
+    contract.reap_expired_lock("seq-2")
+    assert contract.get_epoch() == LOCK_MAX_EPOCH_AGE + 3
+
+    assert contract.get_active_lock_count() == 0
