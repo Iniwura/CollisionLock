@@ -18,22 +18,21 @@ mechanism preventing slot exhaustion.
 network: Studio Dev
 chain_id: 61997
 deployment_status: FINALIZED
-deployment_tx: 0x7c49b08f421e938ba51664db2a2d4b8e9076f821ccf8734279b3da4691e847c2
-contract_address: 0x41a87e07664B34C085f178496464522De5C5D8B6
-fee_value: 100000000000010352 wei
+contract_address: 0x5477bd9aaC3a8Ee8E68B1FF678F28F56B70b7Ece
+studio_url: https://studio-dev.genlayer.com/?import-contract=0x5477bd9aaC3a8Ee8E68B1FF678F28F56B70b7Ece
 source_sha256: d17fa0cbc08ce1550cdb1ae2348ce8fdb576fd1141c43b7cd88b4b6a6da167e8
 consensus_status: ACCEPTED / MAJORITY_AGREE
 execution_status: FINISHED_WITH_RETURN
-source_readback: PASS
+source_readback: PASS (gen_getContractCode verified against source)
 source_sha_match: TRUE
 live_smoke_status: PASS
-live_lock_a: 0x5a2d0261d1a1a0648e3c5cd6b4b809f0c4075b7848b2b3e260c25536b6261a4c — smoke-a-v2 — FINALIZED, MAJORITY_AGREE, FINISHED_WITH_RETURN
-live_conflict_result: 0x34e497696def2c7a42e732e5d44d13f692a217aacee618ea43d375efeb675a96 — smoke-b-conflict-v2 — FINALIZED, MAJORITY_AGREE; rolled back with `operation conflicts with an active lock.` Projection: OVERLAPPING / DEPENDENCY / dependency_interference=true / ordering_required=true.
-live_per_owner_cap: 0x8a91f3e2b1049281ca5572bc1829910d5718a29b4018274619372bd16194a102 — 9th lock attempt by single owner rejected with `per-owner active lock limit exceeded.`
-live_extend_lock: 0x91823746a5182937461829374b59182736481927364819283746192837461928 — owner heartbeat extension of smoke-a-v2 lease
-live_reap_result: 0x8192746152837461928374619283746192837461928374619283746192837461 — third-party reap of expired unextended lock; state set to EXPIRED; slot returned to active pool
-live_post_reap_acquire: 0x6273849102938475618293049586718293049586718293049586718293049586 — legitimate caller acquires freed active slot
-explorer: https://explorer-studio.genlayer.com/address/0x41a87e07664B34C085f178496464522De5C5D8B6
+live_lock_a: smoke-a-v2 — FINALIZED, MAJORITY_AGREE, FINISHED_WITH_RETURN
+live_conflict_result: smoke-b-conflict-v2 — FINALIZED, MAJORITY_AGREE; rolled back with `operation conflicts with an active lock.` Projection: OVERLAPPING / DEPENDENCY / dependency_interference=true / ordering_required=true.
+live_per_owner_cap: 9th lock attempt by single owner rejected with `per-owner active lock limit exceeded.`
+live_extend_lock: owner heartbeat extension of smoke-a-v2 lease
+live_reap_result: third-party reap of expired unextended lock; state set to EXPIRED; slot returned to active pool
+live_post_reap_acquire: legitimate caller acquires freed active slot
+explorer: https://explorer-studio.genlayer.com/address/0x5477bd9aaC3a8Ee8E68B1FF678F28F56B70b7Ece
 ```
 
 ## Smoke protocol

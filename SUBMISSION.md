@@ -42,10 +42,10 @@ test_result: PASS
 genvm_version: vstudio-dev
 source_sha256: d17fa0cbc08ce1550cdb1ae2348ce8fdb576fd1141c43b7cd88b4b6a6da167e8
 deployed: YES
-deployment_tx: 0x7c49b08f421e938ba51664db2a2d4b8e9076f821ccf8734279b3da4691e847c2
-contract_address: 0x41a87e07664B34C085f178496464522De5C5D8B6
+contract_address: 0x5477bd9aaC3a8Ee8E68B1FF678F28F56B70b7Ece
+studio_contract: https://studio-dev.genlayer.com/?import-contract=0x5477bd9aaC3a8Ee8E68B1FF678F28F56B70b7Ece
 github: https://github.com/Iniwura/CollisionLock
-commit: f46c117
+commit: 5f4cce6
 pushed: YES
 secret_scan: PASS
 live_smoke: PASS
